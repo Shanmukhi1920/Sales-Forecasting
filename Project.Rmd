@@ -1,0 +1,743 @@
+---
+title: "Project"
+author: "Shanmukhi"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+**Loading Libraries**
+
+```{r}
+library(janitor) # to clean column names
+library(ggplot2) # for plotting
+library(dplyr) # for aggregation
+library(lubridate)
+library(forecast)
+library(fUnitRoots)
+library(tseries)
+library(TSA) 
+library(lmtest)
+library(astsa)
+library(dynlm)
+source("backtest.R")
+```
+
+**Loading Data**
+
+```{r}
+# Loading data
+sales <- read.csv("train.csv")
+head(sales)
+```
+
+**Data Cleaning**
+
+```{r}
+# Cleaning column names
+sales <- clean_names(sales)
+```
+
+```{r}
+# Convert 'Order Date' and 'Ship Date' to Date format
+sales$order_date <- as.Date(sales$order_date, format="%d/%m/%Y")
+sales$ship_date <- as.Date(sales$ship_date, format="%d/%m/%Y")
+```
+
+```{r}
+# Emitting N/A's
+sales<- na.omit(sales)
+```
+
+**Data Exploration**
+
+```{r}
+# Data Summary
+summary(sales)
+```
+
+```{r}
+# Sales distribution by category
+ggplot(sales, aes(x=category, y=sales, fill=category)) + geom_bar(stat="identity") +
+  labs(title="Sales Distribution by Category", x="Category", y="Total Sales") 
+
+```
+
+**Examining Daily Sales**
+
+```{r}
+# Overall Daily Sales
+daily_sales <- sales %>%
+  group_by(order_date) %>%
+  summarise(total_sales = sum(sales))
+
+print(daily_sales)
+```
+
+For this project, I am focusing on the sales of "Technology" category.
+
+**Examining Daily Sales for Technology Category**
+
+```{r}
+# Daily Sales - Technology
+daily_tech_sales <- sales %>%
+  filter(category == "Technology") %>%
+  group_by(order_date) %>%
+  summarise(total_sales = sum(sales)) 
+
+print(daily_tech_sales)
+```
+
+Looks like an irregular series - going forward with weekly data for now as monthly data can be short!
+
+**Examining Weekly Sales for Technology Category**
+
+```{r}
+# weekly sales - Technology
+tech_weekly_sales <- sales %>%
+  filter(category == "Technology")  %>%
+  mutate(week_year= as.Date(cut(order_date,"week")))%>% 
+  group_by(week_year)%>% 
+  summarize(total_sales= sum(sales),.groups='drop')
+
+print(tech_weekly_sales)
+```
+
+```{r}
+# Plotting series with time
+tech_weekly_sales_ts <- ts(tech_weekly_sales$total_sales, start=c(2015, 1), frequency=52) 
+plot(tech_weekly_sales_ts)
+```
+
+1. The series consists of large spikes, particularly around the beginning of 2015 and mid-2017, indicating significant fluctuations in sales.
+2. There appear to be regular patterns or cycles in the data, suggesting seasonality in sales.
+3. No clear long-term trend (increasing or decreasing) is visible.
+4. The series does not appear to have a consistent mean or variance over time, indicating it may not be stationary.
+
+
+
+```{r}
+# Checking Normality of series
+qqnorm(tech_weekly_sales_ts, main = "Q-Q Plot of Technology Weekly Series")
+qqline(tech_weekly_sales_ts, col = "red", lwd = 2)
+```
+
+The Q-Q Plot deviates significantly from the red line, indicating non-normality. The curvature and points being far from line, especially at upper end could indicate heavy tails or outliers. 
+
+Lets do log transformation as it can help in stabilizing variance and reducing the impact of outliers.
+
+```{r}
+# Log-transformation 
+plot(log(tech_weekly_sales_ts))
+```
+
+The log-transformed series shows reduced variance and more stable fluctuations compared to the original series. Seasonality is still present, but spikes are less pronounced.
+
+```{r}
+# Validating Normality of log-transformation
+qqnorm(log(tech_weekly_sales_ts), main = "Q-Q Plot of Log Technology Weekly Series")
+qqline(log(tech_weekly_sales_ts), col = "red", lwd = 2)
+```
+The Q-Q plot of the log-transformed series shows that the data mostly follows a normal distribution, as the points lie approximately along the red line. However, there are deviations in the tails, particularly at the lower end, indicating some skewness or presence of outliers. Overall, the log transformation has improved normality, but the distribution is not perfectly normal.
+
+
+```{r}
+# Conducting ADF Tests
+adfTest(log(tech_weekly_sales_ts), type="nc")
+adfTest(log(tech_weekly_sales_ts), type="c")
+adfTest(log(tech_weekly_sales_ts), type="ct")
+```
+The log-transformed series appears non-stationary without any deterministic components (type="nc") but shows stationarity when a constant or a constant and trend are included (type="c" and type="ct"). 
+
+```{r}
+# Conducting KPSS test
+kpss.test(log(tech_weekly_sales_ts),null="Level")
+kpss.test(log(tech_weekly_sales_ts),null="Trend")
+```
+The KPSS test results imply that the log-transformed series is not level stationary but is trend stationary.
+
+While the visual plots do not show a clear trend, the statistical tests suggest the presence of a deterministic trend. The discrepancy can occur for several reasons:
+1. The trend might be subtle and not easily visible in the plot.
+2.  The nature of the data, including seasonal patterns and outliers, can sometimes obscure trends.
+
+```{r}
+# Plotting ACF, PACF, EACF
+acf(log(tech_weekly_sales_ts),lag.max=156,main = "ACF of Log Technology Weekly Sales")
+pacf(log(tech_weekly_sales_ts), main = "PACF of Log Technology Weekly Sales")
+eacf(log(tech_weekly_sales_ts))
+```
+**ACF Plot**
+1. Significant positive autocorrelation at Lag1. (suggesting MA(1) component)
+2. Peaks at lag 1, 52, and 104 suggest annual seasonality (52 weeks per year).
+**PACF Plot**
+1.Shows significant spikes at lag 1, suggesting an AR(1) component.
+
+Significant autocorrelations at lag 52 suggest a seasonal component, likely a seasonal AR(1) or MA(1)
+
+```{r}
+# t-test for 1st differences
+t.test(diff(log(tech_weekly_sales_ts)))
+```
+The high p-value indicates that we fail to reject the null hypothesis that the mean of the first differences is not significantly different from 0. 
+This suggests that the series behaves like a random walk, meaning it has no deterministic trend.
+
+**Applying 1st Differencing**
+
+```{r}
+## Applying 1st differencing to make series stationary
+diff_log_weekly_sales <- diff(log(tech_weekly_sales_ts))
+plot(diff_log_weekly_sales)
+```
+The series appears to be more stationary compared to the original series. There is less apparent heteroscedasticity (changing variance over time), suggesting the series has stabilized. The differencing has removed any trend that might have been present.
+
+```{r}
+# Conducting ADF Tests
+adfTest(diff_log_weekly_sales, type="nc")
+adfTest(diff_log_weekly_sales, type="c")
+adfTest(diff_log_weekly_sales, type="ct")
+```
+Since the p-value's are significantly smaller than 0.05, we reject the null hypothesis of a unit root. This confirms that the differenced series is stationary.
+
+```{r}
+# Conducting KPSS test
+kpss.test(diff_log_weekly_sales,null="Level")
+kpss.test(diff_log_weekly_sales,null="Trend")
+```
+The p-values are greater than 0.1, which means we fail to reject the null hypothesis in both cases.
+
+```{r}
+# Plotting ACF, PACF, EACF
+acf(diff_log_weekly_sales,lag.max=104,main = "ACF of Log-Differenced Technology Weekly Sales")
+pacf(diff_log_weekly_sales, main = "PACF of Log-Differenced Technology Weekly Sales")
+eacf(diff_log_weekly_sales)
+```
+
+**ACF Plot**
+1. There is significant autocorrelation at lag1. # MA(1) might be considered
+2. There are noticeable autocorrelation at lags 40, 41, and 103, it suggests that there might be some annual seasonality in the data
+**PACF Plot**
+1. Significant autocorrelations till lag4. # May be an AR(4)
+**EACF Plot**
+ARMA(0,1), ARMA (1,1) or ARMA (2,3) can be considered!
+
+
+**Given some seasonality - Let's try seasonal differencing**
+
+```{r}
+# Plotting ACF, PACF, EACF 
+acf(diff(diff_log_weekly_sales,52),lag.max=104)
+pacf(diff(diff_log_weekly_sales,52))
+eacf(diff(diff_log_weekly_sales,52))
+```
+1. Despite seasonal differencing we could still find some significant autocorrelation at lags 10,40,52.
+2. EACF indicates ARMA (0,2) or ARMA (1,2)
+
+In order to capture the details we could work with SARIMA!
+
+
+```{r}
+#Model Building - BAsed on EACF Plots
+fit1 <- Arima(log(tech_weekly_sales_ts), order=c(0, 1, 1), seasonal=list(order=c(0, 1, 2),seasonal=52))
+fit1
+coeftest(fit1)
+```
+
+```{r}
+# Residual Analysis
+acf(fit1$residuals)
+Box.test(fit1$residuals, lag=10,type="Ljung-Box")
+```
+
+```{r}
+# Back Testing
+backtest(fit1, log(tech_weekly_sales_ts), h=1, orig=.8*length(log(tech_weekly_sales_ts)))
+```
+
+```{r}
+# Forecasting
+fit1_forecast <- forecast(fit1, h=50)
+plot(fit1_forecast)
+```
+
+```{r}
+# Model Building # Based on EACF Plot
+fit2 <- Arima(log(tech_weekly_sales_ts), order=c(1, 1, 1), seasonal=list(order=c(0, 1, 1),seasonal=52))
+fit2
+coeftest(fit2)
+```
+
+```{r}
+# Residual Analysis
+acf(fit2$residuals)
+Box.test(fit2$residuals, lag=10,type="Ljung-Box")
+```
+
+```{r}
+# Back Testing
+backtest(fit2, log(tech_weekly_sales_ts), h=1, orig=.8*length(log(tech_weekly_sales_ts)))
+```
+
+```{r}
+# Forecasting
+fit2_forecast <- forecast(fit2, h=50)
+plot(fit2_forecast)
+```
+
+```{r}
+# Model Building
+fit3 <- Arima(log(tech_weekly_sales_ts), order=c(1, 1, 2), seasonal=list(order=c(0, 1, 1),seasonal=52))
+fit3
+coeftest(fit3)
+```
+
+```{r}
+# Residual Analysis
+acf(fit3$residuals)
+Box.test(fit3$residuals, lag=10,type="Ljung-Box")
+```
+
+```{r}
+# Back Testing
+backtest(fit3, log(tech_weekly_sales_ts), h=1, orig=.8*length(log(tech_weekly_sales_ts)))
+```
+
+```{r}
+# Forecasting
+fit3_forecast <- forecast(fit3, h=50)
+plot(fit3_forecast)
+```
+```{r}
+# Model Building
+fit4 <- Arima(log(tech_weekly_sales_ts), order=c(2,1,2), seasonal=list(order=c(0, 1, 1),seasonal=52))
+fit4
+coeftest(fit4)
+```
+```{r}
+# Residual Analysis
+acf(fit4$residuals)
+Box.test(fit4$residuals, lag=10,type="Ljung-Box")
+```
+
+```{r}
+# Back Testing
+backtest(fit4, log(tech_weekly_sales_ts), h=1, orig=.8*length(log(tech_weekly_sales_ts)))
+```
+
+```{r}
+# Forecasting
+fit4_forecast <- forecast(fit4, h=50)
+plot(fit4_forecast)
+```
+```{r}
+# Model Building
+fit5 <- Arima(log(tech_weekly_sales_ts), order=c(0,1,1), seasonal=list(order=c(1, 1, 1),seasonal=52))
+fit5
+coeftest(fit5)
+```
+```{r}
+# Residual Analysis
+acf(fit5$residuals)
+Box.test(fit5$residuals, lag=10,type="Ljung-Box")
+```
+
+
+```{r}
+# Back Testing
+backtest(fit5, log(tech_weekly_sales_ts), h=1, orig=.8*length(log(tech_weekly_sales_ts)))
+```
+```{r}
+# Forecasting
+fit5_forecast <- forecast(fit5, h=50)
+plot(fit5_forecast)
+```
+
+```{r}
+# Model Building
+fit_aic <- auto.arima(diff_log_weekly_sales)
+fit_aic
+coeftest(fit_aic)
+```
+
+```{r}
+# Residual Analysis
+acf(fit_aic$residuals)
+Box.test(fit_aic$residuals, lag=10,type="Ljung-Box")
+```
+
+```{r}
+# Forecasting
+fit_aic_forecast <- forecast(fit_aic, h=50)
+plot(fit_aic_forecast)
+```
+
+```{r}
+# Model Buiding
+fit_bic <- auto.arima(diff_log_weekly_sales,ic="bic")
+fit_bic
+coeftest(fit_bic)
+
+```
+
+```{r}
+# Residual Analysis
+acf(fit_bic$residuals)
+Box.test(fit_bic$residuals, lag=10,type="Ljung-Box")
+```
+
+```{r}
+# Forecasting
+fit_bic_forecast <- forecast(fit_bic, h=50)
+plot(fit_bic_forecast)
+```
+**Examining Sales for other categories - Office Supplies**
+
+```{r}
+# weekly sales - Office Supplies
+os_weekly_sales <- sales %>%
+  filter(category == "Office Supplies")  %>%
+  mutate(week_year= as.Date(cut(order_date,"week")))%>% 
+  group_by(week_year)%>% 
+  summarize(total_sales= sum(sales),.groups='drop')
+
+print(os_weekly_sales)
+```
+```{r}
+# Plotting series with time
+os_weekly_sales_ts <- ts(os_weekly_sales$total_sales, start=c(2014, 12), frequency=52) 
+plot(os_weekly_sales_ts)
+```
+```{r}
+# Stationarity check - Differencing to make stationary!
+adfTest(diff(tech_weekly_sales_ts))
+kpss.test(diff(tech_weekly_sales_ts))
+
+adfTest(diff(os_weekly_sales_ts))
+kpss.test(diff(os_weekly_sales_ts))
+```
+
+
+**Looking at correlation between Technology and Office Supplies**
+
+```{r}
+tos = ts.intersect(diff(tech_weekly_sales_ts),diff(os_weekly_sales_ts))
+autoplot(tos)
+```
+The visual inspection of the graph does not directly indicate specific lags that would be significant for regression analysis without more detailed statistical testing.
+
+
+```{r}
+cor(tos[,2],tos[,1])
+```
+There is Low direct correlation (Correlation coefficient: -0.02) between technology and office supplies sales, suggesting minimal direct relationship.
+
+
+```{r}
+acf(tos[,1],main="ACF for Technology",lag.max=104)
+acf(tos[,2],main="ACF for Office Supplies",lag.max=104)
+```
+ACF for Technology & Office Supplies: The autocorrelation at lag 0 is always 1 because it's the correlation of the series with itself. The ACF values for subsequent lags are relatively low, mostly within the bounds of significance
+
+
+```{r}
+lag2.plot(tos[,1],tos[,2],15) 
+```
+```{r}
+ccf(tos[,1],tos[,2])
+```
+From Lag plot and CCF, we can say that there is significant autocorrelation at lag -8 indicating predictive relationship between technology sales and office supplies sales.
+
+```{r}
+ossales <- tos[,2]
+tsales_8 <- stats::lag(tos[,1],-8)
+```
+
+
+```{r}
+#Trying dynamic regression
+fit_dr1 = dynlm(ossales ~ tsales_8)
+summary(fit_dr1)
+sqrt(mean(fit_dr1$residuals^2))
+```
+With dynamic regression, all the coefficients were not statistically significant and the R-squared value is so low, indicating that the model explains almost none of the variability in the office supplies sales. The RMSE obtained is 5572.
+
+
+```{r}
+# Trying Arima with regression errors
+fit_lr1 = lm(ossales ~ tsales_8)
+acf(fit_lr1$residuals)
+pacf(fit_lr1$residuals) # may be an AR(5)
+eacf(fit_lr1$residuals)  # may be an ARMA(0,1)
+```
+
+```{r}
+#Fitting ARIMA with reg 
+fit_reg1 = Arima(ossales, xreg=tsales_8, order=c(0, 0, 1))
+coeftest(fit_reg1)
+sqrt(mean(fit_reg1$residuals^2)) 
+```
+
+```{r}
+# Residual Analysis
+acf(fit_reg1$residuals)
+pacf(fit_reg1$residuals)
+eacf(fit_reg1$residuals)
+Box.test(fit_reg1$residuals,lag=10,type="Ljung-Box")
+```
+ARIMA with regression has highly significant ma1 and xreg terms. The residuals are white noise with no auto correlation indicating good fit. Obtained lower RMSE of 3882 compared to dynamic regression!
+
+```{r}
+#Plotting Forecasts
+plot(forecast(fit_reg1,xreg=tsales_8,h=10))
+```
+
+
+**Examining Sales for other categories - Furniture**
+
+```{r}
+# weekly sales - Furniture
+f_weekly_sales <- sales %>%
+  filter(category == "Furniture")  %>%
+  mutate(week_year= as.Date(cut(order_date,"week")))%>% 
+  group_by(week_year)%>% 
+  summarize(total_sales= sum(sales),.groups='drop')
+
+print(f_weekly_sales)
+```
+
+```{r}
+# Plotting series with time
+f_weekly_sales_ts <- ts(f_weekly_sales$total_sales, start=c(2015, 1), frequency=52) 
+plot(f_weekly_sales_ts)
+```
+```{r}
+# Stationarity check - Differencing to make stationary!
+adfTest(diff(tech_weekly_sales_ts))
+kpss.test(diff(tech_weekly_sales_ts))
+
+adfTest(diff(f_weekly_sales_ts))
+kpss.test(diff(f_weekly_sales_ts))
+```
+
+**Looking at correlation between Technology and Furniture**
+
+```{r}
+tf = ts.intersect(diff(tech_weekly_sales_ts),diff(f_weekly_sales_ts)) 
+autoplot(tf)
+
+```
+The visual inspection of the graph does not directly indicate specific lags that would be significant for regression analysis without more detailed statistical testing.
+
+```{r}
+cor(tf[,2],tf[,1])
+```
+
+There is Low direct correlation (Correlation coefficient: 0.09) between technology and office supplies sales, suggesting minimal direct relationship.
+
+
+```{r}
+acf(tf[,1],main="ACF for Technology",lag.max=104)
+acf(tf[,2],main="ACF for Furniture",lag.max=104)
+```
+ACF for Technology & Furniture: The autocorrelation at lag 0 is always 1 because it's the correlation of the series with itself. The ACF values for subsequent lags are relatively low, mostly within the bounds of significance
+
+```{r}
+lag2.plot(tf[,1],tf[,2],15) 
+```
+
+```{r}
+ccf(tf[,1],tf[,2])
+```
+From Lag plot and CCF, we can say that there is significant autocorrelation at lag -5 indicating predictive relationship between technology sales and furniture sales.
+
+```{r}
+#Trying dynamic regression
+fsales <- tf[,2]
+tsales_5 <- stats::lag(tf[,1],-5)
+
+fit_dr2 = dynlm(fsales ~ tsales_5)     
+summary(fit_dr2)
+sqrt(mean(fit_dr2$residuals^2))
+```
+The dynlm results show that, the intercept is not significant, but tsales_5 is significant, indicating a relationship with fsales. The R-squared value is low (0.02667), meaning the model explains only a small portion of the variability in furniture sales. The overall model is significant. The RMSE obtained is 3312.
+
+```{r}
+# Trying Arima with regression errors
+fit_lr2 = lm(fsales ~ tsales_5)
+acf(fit_lr2$residuals)
+pacf(fit_lr2$residuals) # may be an AR(3)
+eacf(fit_lr2$residuals)  # may be an ARMA(0,1) or ARMA(1,1)
+```
+
+```{r}
+#Fitting ARIMA with reg 
+fit_reg2 = Arima(fsales, xreg=tsales_5, order=c(0, 0, 1))
+coeftest(fit_reg2)
+sqrt(mean(fit_reg2$residuals^2)) 
+```
+```{r}
+# Residual Analysis
+acf(fit_reg2$residuals)
+pacf(fit_reg2$residuals)
+eacf(fit_reg2$residuals)
+Box.test(fit_reg2$residuals,lag=10,type="Ljung-Box")
+```
+
+ARIMA with regression has highly significant ma1 and xreg terms. The residuals are white noise with no auto correlation indicating good fit. Obtained lower RMSE of 2615 compared to dynamic regression!
+
+```{r}
+#Plotting Forecasts
+plot(forecast(fit_reg2,xreg=tsales_5,h=10))
+```
+
+
+**Now, Let's examine the correlation between Office supplies and Furniture**
+
+```{r}
+# Stationarity check - Differencing to make stationary!
+adfTest(diff(os_weekly_sales_ts))
+kpss.test(diff(os_weekly_sales_ts))
+
+adfTest(diff(f_weekly_sales_ts))
+kpss.test(diff(f_weekly_sales_ts))
+```
+
+```{r}
+osf = ts.intersect(diff(os_weekly_sales_ts),diff(f_weekly_sales_ts))
+autoplot(osf)
+```
+
+```{r}
+cor(osf[,1],osf[,2])
+```
+There is Moderate direct correlation (Correlation coefficient: 0.15) between office supplies and furniture sales, indicating a stronger direct relationship.
+
+```{r}
+lag2.plot(osf[,2],osf[,1],20) 
+ccf(osf[,2],osf[,1])
+```
+From Lag plot and CCF, we can say that there is significant auto correlation at lag -19, showing that recent furniture sales can forecast office supplies sales.
+
+```{r}
+#Trying dynamic regression
+ossales <- osf[,1]
+fsales_19 <- stats::lag(osf[,2],-19)
+
+fit_dr3 = dynlm(ossales ~  fsales_19)     
+summary(fit_dr3)
+sqrt(mean(fit_dr3$residuals^2))
+```
+The dynlm results show that, the intercept is not significant, but fsales_19 is significant, indicating a relationship with ossales. The R-squared value is low (0.06), meaning the model explains only a small portion of the variability in office supply sales. The overall model is significant. The RMSE obtained is 2965.
+
+```{r}
+# Trying Arima with regression errors
+fit_lr3 = lm(ossales ~ fsales_19)
+acf(fit_lr3$residuals)
+pacf(fit_lr3$residuals) # may be an AR(3)
+eacf(fit_lr3$residuals)  # may be an ARMA(0,1) or ARMA(1,1)
+```
+
+```{r}
+#Fitting ARIMA with reg 
+fit_reg3 = Arima(ossales, xreg=fsales_19, order=c(0, 0, 1))
+coeftest(fit_reg3)
+sqrt(mean(fit_reg3$residuals^2)) 
+```
+
+```{r}
+# Residual Analysis
+acf(fit_reg3$residuals)
+pacf(fit_reg3$residuals)
+eacf(fit_reg3$residuals)
+Box.test(fit_reg3$residuals,lag=10,type="Ljung-Box")
+```
+
+ARIMA with regression has highly significant ma1 and xreg terms. The residuals are white noise with no auto correlation indicating good fit. Obtained lower RMSE of 2440 compared to dynamic regression!
+
+```{r}
+#Plotting Forecasts
+plot(forecast(fit_reg3,xreg=fsales_19,h=10))
+```
+--Rather than using a series as an dependent variable to predict other, lets explore inter relationships between series
+
+**Vector Autoregressive model**
+
+```{r}
+sales <- ts.intersect(diff(tech_weekly_sales_ts),diff(os_weekly_sales_ts),diff(f_weekly_sales_ts))
+```
+
+From above analysis:
+
+Technology & Office Supplies: significant at lag -8
+Technology & Furniture: significant at lag -5
+Furniture & Office Supplies: significant at lag -19
+
+The maximum significant lag is -19. Therefore, lets use the maximum lag for our VAR model to 19
+
+```{r}
+sales_var <- VARselect(sales, lag.max = 19)
+print(sales_var)
+```
+Considering model simplicity and efficiency, a maximum lag of 4 is reasonable for our VAR model, as both AIC and FPE suggest this lag length.
+
+
+```{r}
+# test with lag-4
+var_model <- VAR(sales, p=4)
+summary(var_model)
+```
+The VAR model with a lag of 4 includes variables: diff.tech_weekly_sales_ts., diff.os_weekly_sales_ts., and diff.f_weekly_sales_ts.
+
+The sample size is 163, and the log likelihood is -4618.292.
+
+Significant lags for Technology Sales are l1, l2, l3, and l4 (p < 0.01) with an adjusted R-squared of 0.3134.
+
+For Office Supplies Sales, significant lags are l1, l2, and l3 (p < 0.01) with an adjusted R-squared of 0.2523.
+
+For Furniture Sales, significant lags are l1, l2, and l3 (p < 0.05) with an adjusted R-squared of 0.3037.
+
+The model is stable with all roots of the characteristic polynomial within the unit circle.
+
+Residual correlation between series is low: Tech & Office Supplies (0.0002), Tech & Furniture (0.2167), and Office Supplies & Furniture (0.2127).
+
+Significant autoregressive terms indicate past values are good predictors of current values, and moderate adjusted R-squared values suggest the model explains a fair amount of variability.
+
+```{r}
+serial_test <- serial.test(var_model,lags.pt=10, type="PT.asymptotic")
+serial_test
+```
+Since the p-value is less than 0.05, it indicates the presence of autocorrelation in the residuals, suggesting that the model may need improvement to fully account for all the serial correlation in the data.
+
+```{r}
+# Lets increase lags to 10.
+var_model <- VAR(sales, p=10)
+summary(var_model)
+```
+
+----------------------Significant Lags---------------------
+
+1. Technology Weekly Sales (diff.tech_weekly_sales_ts.):
+-Self: Significant lags: l1, l2, l3, l4, l5, l6, l9
+-Office Supplies: Significant lag: l6
+
+-Furniture: Significant lag: l8
+2. Office Supplies Weekly Sales (diff.os_weekly_sales_ts.):
+-Self: Significant lags: l1, l2, l3, l4, l5, l6, l7, l8
+
+3. Furniture Weekly Sales (diff.f_weekly_sales_ts.):
+-Self: Significant lags: l1, l2, l3, l4, l5, l6, l7, l8
+-Technology: Significant lags: l6, l8
+-Furniture: Significant lags: l7
+
+
+```{r}
+serial_test <- serial.test(var_model,lags.pt=16, type="PT.asymptotic")
+serial_test
+```
+The Portmanteau test for the VAR model with 10 lags indicates that the residuals no longer exhibit significant autocorrelation (p-value = 0.3848). This suggests that the model with 10 lags adequately captures the dependencies in the data. 
+
+```{r}
+#15 step ahead forecast
+autoplot(forecast(var_model, h=15))
+```
+
