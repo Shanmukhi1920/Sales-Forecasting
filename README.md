@@ -48,6 +48,15 @@ Performed Prewhitening to remove autocorrelations within the series to forecast 
 ### Vector Autoregressive (VAR) Models
 Estimated VAR models to capture the interdependencies between multiple time series, such as Technology, Office, and Furniture sales and evaluated the performance of the VAR models using Portmanteau Test.
 
+## Usage
+To reproduce the analysis or use the forecasting models, follow these steps:
+
+1. Clone the repository or download the source code.
+2. Open the `Project.Rmd` file in RStudio or a compatible R environment.
+3. Ensure that you have the required R packages installed (e.g., forecast, tseries, vars).
+4. Follow the instructions and code provided in the R Markdown file to preprocess the data, train the models, and generate forecasts.
+
+
 ## Key Findings
 - ARIMA(0,1,1)(1,1,1)[52] emerged as the best-performing model, balancing fit and complexity while providing accurate forecasts.
 - The analysis highlighted the significance of seasonal patterns and trends in sales data. Regression with ARIMA errors showed that technology sales significantly impact office and furniture sales, particularly at specific lags.
