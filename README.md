@@ -1,4 +1,4 @@
-# Sales_Forecasting
+
 ## Overview
 This project focuses on predicting weekly sales in the Technology category using advanced time series analysis. The main goal is to uncover trends and seasonal patterns in sales data to create precise forecasting models. It employs a range of sophisticated techniques, including ARIMA (Autoregressive Integrated Moving Average) and Vector Autoregressive (VAR) models, to determine the most effective approach. The project extends its analysis by using regression with ARIMA errors to forecast sales in related categories like Office and Furniture, leveraging insights from Technology sales data. This comprehensive approach aims to provide valuable sales predictions for multiple product categories, potentially improving inventory management, resource allocation, and strategic planning in retail or e-commerce settings.
 
